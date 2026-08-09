@@ -85,10 +85,11 @@ func (n NavidromeConfig) IsSet() bool {
 // who never registered their own developer app — see Spotify's Nov 27, 2024
 // dev-mode quota restriction.
 type SpotifyConfig struct {
-	Disabled bool   // true only when user explicitly sets enabled = false
-	Enabled  bool   // true when [spotify] section exists (even without client_id)
-	ClientID string // Spotify Developer app client ID (overrides built-in fallback)
-	Bitrate  int    // preferred Spotify stream bitrate in kbps
+	Disabled   bool   // true only when user explicitly sets enabled = false
+	Enabled    bool   // true when [spotify] section exists (even without client_id)
+	ClientID   string // Spotify Developer app client ID (overrides built-in fallback)
+	Bitrate    int    // preferred Spotify stream bitrate in kbps
+	DeviceName string // name announced in the Spotify Connect device picker
 }
 
 // IsSet reports whether the Spotify provider should be shown. Section presence
@@ -292,7 +293,7 @@ func defaultConfig() Config {
 		BitDepth:        16,
 		PaddingH:        3,
 		PaddingV:        1,
-		Spotify:         SpotifyConfig{Bitrate: 320},
+		Spotify:         SpotifyConfig{Bitrate: 320, DeviceName: "cliamp"},
 		Qobuz:           QobuzConfig{Quality: 6},
 		LogLevel:        "info",
 	}
@@ -387,6 +388,8 @@ func Load() (Config, error) {
 				if v, err := strconv.Atoi(val); err == nil {
 					cfg.Spotify.Bitrate = v
 				}
+			case "device_name":
+				cfg.Spotify.DeviceName = parseString(val)
 			}
 		case "qobuz":
 			switch key {

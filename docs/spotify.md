@@ -16,6 +16,7 @@ Register a Spotify Developer app and set `client_id` in `~/.config/cliamp/config
 [spotify]
 client_id = "your_client_id_here"
 bitrate = 320
+device_name = "cliamp"
 ```
 
 To register one:
@@ -28,7 +29,7 @@ To register one:
 6. Click **Save**
 7. Open your app's **Settings** and copy the **Client ID**
 
-`bitrate` is optional. If omitted, cliamp uses `320`. Supported values are `96`, `160`, and `320`. Non-positive values (≤ 0) are treated as `320`. Other positive values are rounded to the nearest supported bitrate.
+`bitrate` is optional. If omitted, cliamp uses `320`. Supported values are `96`, `160`, and `320`. Non-positive values (≤ 0) are treated as `320`. Other positive values are rounded to the nearest supported bitrate. `device_name` controls cliamp's name in the Spotify Connect picker and defaults to `cliamp`.
 
 Run `cliamp`, select Spotify as a provider, and press Enter to sign in. Credentials are cached at `~/.config/cliamp/spotify_credentials.json`. Subsequent launches refresh silently.
 

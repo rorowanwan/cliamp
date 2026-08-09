@@ -12,6 +12,7 @@ import (
 
 	"github.com/gopxl/beep/v2"
 
+	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/playlist"
 )
 
@@ -26,14 +27,17 @@ type SpotifyProvider struct{}
 // New returns nil — Spotify is disabled on Windows because
 // go-librespot requires CGO (FLAC, Vorbis, ALSA) which cannot
 // cross-compile. Callers must nil-check the return value.
-// bitrate is ignored on this platform.
-func New(_ *Session, _ string, _ int) *SpotifyProvider { return nil }
+// bitrate and deviceName are ignored on this platform.
+func New(_ *Session, _ string, _ int, _ string) *SpotifyProvider { return nil }
 
 // Close is a no-op.
 func (p *SpotifyProvider) Close() {}
 
 // Name returns the provider name.
 func (p *SpotifyProvider) Name() string { return "Spotify" }
+
+// ConnectNotifier is unavailable on Windows along with Spotify playback.
+func (p *SpotifyProvider) ConnectNotifier() playback.Notifier { return nil }
 
 // Playlists returns nil — Spotify is unavailable on Windows.
 func (p *SpotifyProvider) Playlists() ([]playlist.PlaylistInfo, error) { return nil, nil }

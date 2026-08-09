@@ -23,6 +23,8 @@ import (
 	"github.com/gopxl/beep/v2"
 
 	"github.com/bjarneo/cliamp/applog"
+	spotifyconnect "github.com/bjarneo/cliamp/external/spotify/connect"
+	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 )
@@ -48,6 +50,7 @@ type playlistCache struct {
 
 type SpotifyProvider struct {
 	session    *Session
+	connect    *spotifyconnect.Service
 	clientID   string
 	bitrate    int
 	userID     string // Spotify user ID, fetched lazily on first Playlists() call
@@ -66,13 +69,19 @@ const playlistListCacheTTL = 5 * time.Minute
 // New creates a SpotifyProvider. If session is nil, authentication is
 // deferred until the user first selects the Spotify provider.
 // bitrate sets the preferred Spotify stream quality in kbps (96, 160, or 320).
-func New(session *Session, clientID string, bitrate int) *SpotifyProvider {
-	return &SpotifyProvider{
+// deviceName is the name announced through Spotify Connect.
+func New(session *Session, clientID string, bitrate int, deviceName string) *SpotifyProvider {
+	p := &SpotifyProvider{
 		session:    session,
+		connect:    spotifyconnect.New(deviceName),
 		clientID:   clientID,
 		bitrate:    bitrate,
 		trackCache: make(map[string]*playlistCache),
 	}
+	if session != nil {
+		p.bindConnect(session)
+	}
+	return p
 }
 
 // ensureSession tries to create a session using stored credentials only
@@ -97,6 +106,7 @@ func (p *SpotifyProvider) ensureSession() error {
 	p.session = sess
 	p.resetSessionScopedStateLocked()
 	p.mu.Unlock()
+	p.bindConnect(sess)
 	return nil
 }
 
@@ -138,21 +148,29 @@ func (p *SpotifyProvider) Authenticate() error {
 	p.session = sess
 	p.resetSessionScopedStateLocked()
 	p.mu.Unlock()
+	p.bindConnect(sess)
 	return nil
 }
 
 // Close releases the session if one was created.
 func (p *SpotifyProvider) Close() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.authCancel != nil {
 		p.authCancel()
 		p.authCancel = nil
 	}
-	if p.session != nil {
-		p.session.Close()
-		p.session = nil
-		p.resetSessionScopedStateLocked()
+	connect := p.connect
+	p.connect = nil
+	sess := p.session
+	p.session = nil
+	p.resetSessionScopedStateLocked()
+	p.mu.Unlock()
+
+	if connect != nil {
+		connect.Close()
+	}
+	if sess != nil {
+		sess.Close()
 	}
 }
 
@@ -164,6 +182,34 @@ func (p *SpotifyProvider) resetSessionScopedStateLocked() {
 }
 
 func (p *SpotifyProvider) Name() string { return "Spotify" }
+
+// ConnectNotifier returns the Spotify Connect state publisher. It is always
+// present for non-Windows Spotify providers, but remains idle until a Spotify
+// stream has an authenticated session and starts playback.
+func (p *SpotifyProvider) ConnectNotifier() playback.Notifier {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.connect
+}
+
+func (p *SpotifyProvider) bindConnect(sess *Session) {
+	if p == nil || sess == nil {
+		return
+	}
+	librespotSession, deviceID := sess.ConnectEndpoint()
+	if librespotSession == nil {
+		return
+	}
+	p.mu.Lock()
+	connect := p.connect
+	p.mu.Unlock()
+	if connect != nil {
+		connect.Bind(librespotSession, deviceID)
+	}
+}
 
 // currentUserID returns the authenticated user's Spotify ID, fetched from
 // /v1/me at most once per session. Failures are remembered so a network blip
@@ -485,6 +531,7 @@ func (p *SpotifyProvider) NewStreamer(uri string) (beep.StreamSeekCloser, beep.F
 		applog.UserWarn("spotify: silent reconnect failed (%v); sign-in required", reconnErr)
 		return nil, beep.Format{}, 0, fmt.Errorf("spotify: stream auth error, silent reconnect failed: %w", playlist.ErrNeedsAuth)
 	}
+	p.bindConnect(p.session)
 
 	s, err = tryStream()
 	if err == nil {

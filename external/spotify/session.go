@@ -408,6 +408,16 @@ func (s *Session) NewStream(ctx context.Context, spotID librespot.SpotifyId, bit
 	return s.player.NewStream(ctx, http.DefaultClient, spotID, bitrate, 0)
 }
 
+// ConnectEndpoint returns the live librespot session and stable device ID used
+// by the Spotify Connect publisher. Callers must treat the returned session as
+// a snapshot: Reconnect can replace it, after which the provider rebinds the
+// publisher to the new session.
+func (s *Session) ConnectEndpoint() (*session.Session, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sess, s.devID
+}
+
 // webApiWithBody calls the Spotify Web API using the OAuth2 access token.
 //
 // The spclient/login5 token from librespot is NOT accepted by the Web API

@@ -40,6 +40,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Spotify.Bitrate != 320 {
 		t.Errorf("Spotify.Bitrate = %d, want 320", cfg.Spotify.Bitrate)
 	}
+	if cfg.Spotify.DeviceName != "cliamp" {
+		t.Errorf("Spotify.DeviceName = %q, want cliamp", cfg.Spotify.DeviceName)
+	}
 	if cfg.AutoPlay {
 		t.Error("AutoPlay should be false by default")
 	}
@@ -437,6 +440,25 @@ func TestLoadSpotifyBitrate(t *testing.T) {
 				t.Fatalf("Spotify.Bitrate = %d, want %d", cfg.Spotify.Bitrate, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadSpotifyDeviceName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(os.Getenv("HOME"), ".config", "cliamp", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("[spotify]\ndevice_name = \"living room\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Spotify.DeviceName != "living room" {
+		t.Fatalf("Spotify.DeviceName = %q, want living room", cfg.Spotify.DeviceName)
 	}
 }
 

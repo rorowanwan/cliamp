@@ -98,7 +98,7 @@ func run(overrides config.Overrides, positional []string, daemon bool) error {
 	var spotifyProv *spotify.SpotifyProvider
 	if cfg.Spotify.IsSet() {
 		clientID := cfg.Spotify.ResolveClientID(spotify.DefaultClientID)
-		spotifyProv = spotify.New(nil, clientID, cfg.Spotify.Bitrate)
+		spotifyProv = spotify.New(nil, clientID, cfg.Spotify.Bitrate, cfg.Spotify.DeviceName)
 		if spotifyProv != nil {
 			providers = append(providers, model.ProviderEntry{Key: "spotify", Name: "Spotify", Provider: spotifyProv})
 		} else {
@@ -422,7 +422,11 @@ func run(overrides config.Overrides, positional []string, daemon bool) error {
 		defer qobuz.SetAuthURLObserver(nil)
 	}
 
-	svc, svcErr := wireMediaCtl(prog)
+	var spotifyNotifier playback.Notifier
+	if spotifyProv != nil {
+		spotifyNotifier = spotifyProv.ConnectNotifier()
+	}
+	svc, svcErr := wireMediaCtl(prog, spotifyNotifier)
 	if svcErr != nil {
 		applog.Warn("media control (MPRIS/NowPlaying) unavailable: %v", svcErr)
 	} else if svc != nil {
@@ -516,13 +520,22 @@ func initLogging(levelStr string) (func() error, string, error) {
 	return closeFn, level.String(), nil
 }
 
-func wireMediaCtl(prog *tea.Program) (*mediactl.Service, error) {
-	svc, err := mediactl.New(prog.Send)
-	if err != nil || svc == nil {
-		return svc, err
+func wireMediaCtl(prog *tea.Program, extra ...playback.Notifier) (*mediactl.Service, error) {
+	notifiers := model.MultiNotifier{}
+	for _, notifier := range extra {
+		if notifier != nil {
+			notifiers = append(notifiers, notifier)
+		}
 	}
-	go prog.Send(model.AttachNotifier(svc))
-	return svc, nil
+
+	svc, err := mediactl.New(prog.Send)
+	if svc != nil {
+		notifiers = append(notifiers, svc)
+	}
+	if len(notifiers) > 0 {
+		go prog.Send(model.AttachNotifier(notifiers))
+	}
+	return svc, err
 }
 
 func ipcSend(req ipc.Request) (ipc.Response, error) {

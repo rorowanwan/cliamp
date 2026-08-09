@@ -74,6 +74,7 @@ eq = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 # [spotify]
 # client_id = "your-spotify-app-client-id"
 # bitrate = 320
+# device_name = "cliamp"
 #
 # Note: apps registered after Nov 27, 2024 in Development Mode can't use
 # /v1/search (Spotify returns "Invalid limit"). Everything else works.
