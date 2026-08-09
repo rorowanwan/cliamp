@@ -70,3 +70,18 @@ func TestSpotifyStateAndVolume(t *testing.T) {
 		t.Fatalf("positive dB volume = %d, want %d", got, maxStateVolume)
 	}
 }
+
+func TestDeviceInfoAdvertisesRemoteControlCapabilities(t *testing.T) {
+	device := newDeviceInfo("cliamp", "device-id")
+	if !device.CanPlay {
+		t.Fatal("CanPlay = false, want true")
+	}
+	if device.Volume != maxStateVolume || device.Capabilities.VolumeSteps != maxStateVolume {
+		t.Fatalf("volume capability = %d/%d, want %d", device.Volume, device.Capabilities.VolumeSteps, maxStateVolume)
+	}
+
+	capabilities := device.Capabilities
+	if !capabilities.CanBePlayer || !capabilities.IsControllable || !capabilities.CommandAcks || !capabilities.SupportsCommandRequest || !capabilities.SupportsTransferCommand || capabilities.DisableVolume || capabilities.ConnectDisabled {
+		t.Fatalf("remote-control capabilities = %#v", capabilities)
+	}
+}

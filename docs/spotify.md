@@ -73,6 +73,12 @@ When focused on the provider panel:
 
 After loading a playlist you return to the standard playlist view with all the usual controls (seek, volume, EQ, shuffle, repeat, queue, search, lyrics).
 
+## Spotify Connect
+
+While playing a Spotify track, cliamp registers as an active Spotify Connect device using `device_name` (default `cliamp`). Controls from another Spotify client—play, pause, next, previous, seek, and volume—operate through the same playback path as local and MPRIS controls.
+
+Selecting cliamp as the playback device transfers the current track, its position, paused state, and any tracks supplied in Spotify's transfer payload into cliamp's queue.
+
 ## Playlists
 
 Only playlists in your Spotify library are shown. This includes playlists you've created and playlists you've saved (followed). If a public playlist doesn't appear, open Spotify and click **Save** on it first. There's no need to copy tracks to a new playlist.

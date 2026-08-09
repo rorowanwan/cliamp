@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	librespot "github.com/devgianlu/go-librespot"
 	"github.com/devgianlu/go-librespot/audio"
 	"github.com/gopxl/beep/v2"
@@ -193,6 +194,20 @@ func (p *SpotifyProvider) ConnectNotifier() playback.Notifier {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.connect
+}
+
+// SetConnectSender wires dealer-originated Spotify Connect commands into the
+// running Bubbletea program, following the same dispatch pattern as MPRIS.
+func (p *SpotifyProvider) SetConnectSender(send func(tea.Msg)) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	connect := p.connect
+	p.mu.Unlock()
+	if connect != nil {
+		connect.SetSender(send)
+	}
 }
 
 func (p *SpotifyProvider) bindConnect(sess *Session) {

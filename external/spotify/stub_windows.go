@@ -10,6 +10,7 @@ import (
 	"errors"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/gopxl/beep/v2"
 
 	"github.com/bjarneo/cliamp/internal/playback"
@@ -38,6 +39,9 @@ func (p *SpotifyProvider) Name() string { return "Spotify" }
 
 // ConnectNotifier is unavailable on Windows along with Spotify playback.
 func (p *SpotifyProvider) ConnectNotifier() playback.Notifier { return nil }
+
+// SetConnectSender is unavailable on Windows along with Spotify playback.
+func (p *SpotifyProvider) SetConnectSender(func(tea.Msg)) {}
 
 // Playlists returns nil — Spotify is unavailable on Windows.
 func (p *SpotifyProvider) Playlists() ([]playlist.PlaylistInfo, error) { return nil, nil }

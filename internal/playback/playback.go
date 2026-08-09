@@ -15,6 +15,11 @@ type (
 		Position time.Duration
 	}
 	SetVolumeMsg struct{ VolumeDB float64 }
+	TransferMsg  struct {
+		Tracks   []Track
+		Position time.Duration
+		Paused   bool
+	}
 )
 
 type Status string

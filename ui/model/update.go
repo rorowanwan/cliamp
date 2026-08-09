@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/history"
 	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/ipc"
@@ -819,6 +820,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case playback.PlayMsg:
+		applog.Debug("spotify connect: model handling playback.PlayMsg")
 		if !m.player.IsPlaying() || m.player.IsPaused() {
 			cmd := m.togglePlayPause()
 			m.notifyAll()
@@ -827,6 +829,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case playback.PauseMsg:
+		applog.Debug("spotify connect: model handling playback.PauseMsg")
 		if m.player.IsPlaying() && !m.player.IsPaused() {
 			m.togglePlayerPause()
 			m.notifyAll()
@@ -834,27 +837,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case playback.NextMsg:
+		applog.Debug("spotify connect: model handling playback.NextMsg")
 		m.scrobbleCurrent()
 		cmd := m.nextTrack()
 		m.notifyAll()
 		return m, cmd
 
 	case playback.PrevMsg:
+		applog.Debug("spotify connect: model handling playback.PrevMsg")
 		m.scrobbleCurrent()
 		cmd := m.prevTrack()
 		m.notifyAll()
 		return m, cmd
 
 	case playback.SeekMsg:
+		applog.Debug("spotify connect: model handling playback.SeekMsg offset=%s", msg.Offset)
 		return m, m.seekRelative(msg.Offset, 0)
 
 	case playback.SetPositionMsg:
+		applog.Debug("spotify connect: model handling playback.SetPositionMsg position=%s", msg.Position)
 		return m, m.seekAbsolute(msg.Position)
 
 	case playback.SetVolumeMsg:
+		applog.Debug("spotify connect: model handling playback.SetVolumeMsg volume_db=%.2f", msg.VolumeDB)
 		m.player.SetVolume(msg.VolumeDB)
 		m.notifyAll()
 		return m, nil
+
+	case playback.TransferMsg:
+		applog.Debug("spotify connect: model handling playback.TransferMsg tracks=%d position=%s paused=%t", len(msg.Tracks), msg.Position, msg.Paused)
+		return m, m.applySpotifyTransfer(msg)
 
 	case playback.StopMsg:
 		m.player.Stop()

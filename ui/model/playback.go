@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/provider"
 )
@@ -112,6 +113,66 @@ func (m *Model) playTrackImmediate(track playlist.Track) tea.Cmd {
 	cmd := m.playCurrentTrack()
 	m.notifyPlayback()
 	return cmd
+}
+
+// applySpotifyTransfer replaces the queue with the transferred Spotify tracks
+// and starts the remote current track (always index zero). Position and pause
+// are sent back through the ordinary playback message path so MPRIS, Connect,
+// and plugins observe the same state transitions as local controls.
+func (m *Model) applySpotifyTransfer(msg playback.TransferMsg) tea.Cmd {
+	if len(msg.Tracks) == 0 {
+		return nil
+	}
+
+	tracks := make([]playlist.Track, len(msg.Tracks))
+	for i, track := range msg.Tracks {
+		tracks[i] = playlist.Track{
+			Path:         track.URL,
+			Title:        track.Title,
+			Artist:       track.Artist,
+			Album:        track.Album,
+			Genre:        track.Genre,
+			TrackNumber:  track.TrackNumber,
+			AlbumArtURL:  track.ArtURL,
+			DurationSecs: int(track.Duration.Seconds()),
+		}
+	}
+
+	m.player.Stop()
+	m.player.ClearPreload()
+	m.preloading = false
+	m.resetYTDLBatch()
+	m.playlist.Replace(tracks)
+	m.setHeaderStateFromTracks(tracks)
+	m.loadedPlaylist = ""
+	m.plCursor = 0
+	m.plScroll = 0
+	m.focus = focusPlaylist
+	m.applyHeightMode()
+	m.adjustScroll()
+	m.status.Showf(statusTTLMedium, "Spotify Connect: playing %s", tracks[0].DisplayName())
+
+	playCmd := m.playCurrentTrack()
+	settle := make([]tea.Cmd, 0, 2)
+	if msg.Position > 0 {
+		settle = append(settle, func() tea.Msg {
+			return playback.SetPositionMsg{Position: msg.Position}
+		})
+	}
+	if msg.Paused {
+		settle = append(settle, func() tea.Msg {
+			return playback.PauseMsg{}
+		})
+	}
+	m.notifyAll()
+	if len(settle) == 0 {
+		return playCmd
+	}
+	settleCmd := tea.Sequence(settle...)
+	if playCmd == nil {
+		return settleCmd
+	}
+	return tea.Batch(playCmd, settleCmd)
 }
 
 // appendTrack appends a track to the playlist; auto-plays if nothing is playing.

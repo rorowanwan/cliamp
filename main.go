@@ -410,6 +410,7 @@ func run(overrides config.Overrides, positional []string, daemon bool) error {
 	prog := tea.NewProgram(m, progOpts...)
 
 	if spotifyProv != nil {
+		spotifyProv.SetConnectSender(prog.Send)
 		spotify.SetAuthURLObserver(func(u string) {
 			prog.Send(model.ProvAuthURLMsg{ProviderName: spotifyProv.Name(), URL: u})
 		})

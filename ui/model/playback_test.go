@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/bjarneo/cliamp/playlist"
 	"github.com/bjarneo/cliamp/ui"
 )
@@ -146,6 +147,33 @@ func TestTogglePlayPauseRestartsQueuedCurrentTrack(t *testing.T) {
 	}
 	if current, idx := m.playlist.Current(); current.Title != "Queued" || idx != 1 {
 		t.Fatalf("current = (%q,%d), want (\"Queued\",1)", current.Title, idx)
+	}
+}
+
+func TestSpotifyTransferReplacesQueueAndPlaysCurrentTrack(t *testing.T) {
+	player := &playbackFakeEngine{}
+	queue := playlist.New()
+	queue.Replace([]playlist.Track{{Title: "Old", Path: "old.mp3"}})
+	m := Model{
+		player:   player,
+		playlist: queue,
+		vis:      ui.NewVisualizer(float64(player.SampleRate())),
+	}
+
+	next, _ := m.Update(playback.TransferMsg{Tracks: []playback.Track{
+		{URL: "spotify:track:0123456789ABCDEFGHIJKL", Title: "Transferred", Duration: 3 * time.Minute},
+		{URL: "spotify:track:ABCDEFGHIJKL0123456789", Title: "Queued"},
+	}})
+	m = next.(Model)
+
+	if got := m.playlist.Tracks(); len(got) != 2 || got[0].Title != "Transferred" || got[1].Title != "Queued" {
+		t.Fatalf("queue = %#v, want transferred tracks", got)
+	}
+	if len(player.playCalls) != 1 || player.playCalls[0] != "spotify:track:0123456789ABCDEFGHIJKL" {
+		t.Fatalf("play calls = %v, want transferred current track", player.playCalls)
+	}
+	if m.loadedPlaylist != "" {
+		t.Fatalf("loadedPlaylist = %q, want empty", m.loadedPlaylist)
 	}
 }
 
