@@ -1,3 +1,26 @@
+> [!NOTE]
+> This is a fork of [bjarneo/cliamp] adding Spotify Connect support.
+
+## Spotify Connect
+
+This fork extends cliamp's existing Spotify integration with Spotify Connect support.
+
+### What's added
+
+- Advertises cliamp as a Spotify Connect device
+- Playback state and metadata synchronization
+- Remote play/pause and resume
+- Remote next/previous controls
+- Remote seeking
+- Remote volume control
+- Playback transfer to cliamp
+- Configurable Spotify Connect device name
+- State-update coalescing and rate-limit handling
+
+Spotify Connect support is currently experimental and has been tested with Spotify Premium.
+
+For the original project and documentation, see the upstream cliamp repository below.
+
 [![Docs on contextowl.co](https://contextowl.co/uploads/_brand/badge-docs.svg)](https://contextowl.co)
 
 A retro terminal music player inspired by Winamp. Play local files, streams, podcasts, YouTube, YouTube Music, SoundCloud, Bilibili, Spotify, NetEase Cloud Music, Xiaoyuzhou (小宇宙), Navidrome, Plex, and Jellyfin with a spectrum visualizer, parametric EQ, and playlist management.
