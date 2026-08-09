@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/bjarneo/cliamp/internal/playback"
 	"github.com/devgianlu/go-librespot/dealer"
 	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
@@ -313,6 +314,77 @@ func TestServiceRebindPublishesNewDeviceState(t *testing.T) {
 	_, _, request := secondClient.snapshot()
 	if request.PutStateReason != connectpb.PutStateReason_NEW_DEVICE {
 		t.Fatalf("rebound reason = %s, want NEW_DEVICE", request.PutStateReason)
+	}
+}
+
+func TestDealerRequestPayloadWithoutContextDoesNotPanic(t *testing.T) {
+	service := New("cliamp")
+	defer service.Close()
+	var got any
+	service.SetSender(func(message tea.Msg) { got = message })
+	service.mu.Lock()
+	service.registered = true
+	service.state = spotifyPlaybackState()
+	service.mu.Unlock()
+
+	var payload dealer.RequestPayload
+	payload.Command.Endpoint = "pause"
+	if err := service.handleDealerRequestPayload(playerCommandURI, payload); err != nil {
+		t.Fatalf("handleDealerRequestPayload() error = %v", err)
+	}
+	if _, ok := got.(playback.PauseMsg); !ok {
+		t.Fatalf("dispatched %T, want playback.PauseMsg", got)
+	}
+}
+
+func TestDealerRequestPayloadRejectsMalformedCommands(t *testing.T) {
+	service := New("cliamp")
+	defer service.Close()
+	tests := []struct {
+		name         string
+		messageIdent string
+		endpoint     string
+	}{
+		{"wrong URI", "hm://connect-state/v1/other", "pause"},
+		{"empty endpoint", playerCommandURI, ""},
+		{"unknown endpoint", playerCommandURI, "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var payload dealer.RequestPayload
+			payload.Command.Endpoint = tt.endpoint
+			if err := service.handleDealerRequestPayload(tt.messageIdent, payload); err == nil {
+				t.Fatal("handleDealerRequestPayload() accepted malformed request")
+			}
+		})
+	}
+}
+
+func TestDealerMessageToleratesMissingHeadersAndPayload(t *testing.T) {
+	service := New("cliamp")
+	defer service.Close()
+	service.handleDealerMessage(dealer.Message{})
+	service.handleDealerMessage(dealer.Message{Uri: "hm://pusher/v1/connections/test"})
+	service.handleDealerMessage(dealer.Message{Uri: "hm://connect-state/v1/connect/volume"})
+}
+
+func TestStaleDealerReceiversAreRejected(t *testing.T) {
+	service := New("cliamp")
+	defer service.Close()
+	currentMessages := make(chan dealer.Message)
+	currentRequests := make(chan dealer.Request)
+	staleMessages := make(chan dealer.Message)
+	staleRequests := make(chan dealer.Request)
+	service.mu.Lock()
+	service.receiver = currentMessages
+	service.requests = currentRequests
+	service.mu.Unlock()
+
+	if !service.isCurrentMessageReceiver(currentMessages) || !service.isCurrentRequestReceiver(currentRequests) {
+		t.Fatal("current dealer receivers were rejected")
+	}
+	if service.isCurrentMessageReceiver(staleMessages) || service.isCurrentRequestReceiver(staleRequests) {
+		t.Fatal("stale dealer receiver was accepted")
 	}
 }
 

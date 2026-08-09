@@ -129,6 +129,10 @@ func transferMessage(data []byte, restorePaused string) (any, error) {
 	}
 	if state.CurrentSession != nil && state.CurrentSession.Context != nil {
 		for _, page := range state.CurrentSession.Context.Pages {
+			if page == nil {
+				applog.Debug("spotify connect: ignoring nil page in transfer state")
+				continue
+			}
 			for _, track := range page.Tracks {
 				if err := appendTrack(track); err != nil {
 					return nil, err

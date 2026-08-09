@@ -172,3 +172,19 @@ func TestDispatchCommandRequiresActiveConnectState(t *testing.T) {
 		t.Fatalf("dispatched %T, want playback.PauseMsg", got)
 	}
 }
+
+func TestTransferMessageIgnoresNilContextPages(t *testing.T) {
+	state := &connectpb.TransferState{
+		Playback: &connectpb.Playback{CurrentTrack: &connectpb.ContextTrack{Uri: "spotify:track:0123456789ABCDEFGHIJKL"}},
+		CurrentSession: &connectpb.Session{
+			Context: &connectpb.Context{Pages: []*connectpb.ContextPage{nil}},
+		},
+	}
+	data, err := proto.Marshal(state)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if _, err := transferMessage(data, ""); err != nil {
+		t.Fatalf("transferMessage() error = %v", err)
+	}
+}

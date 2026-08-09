@@ -221,6 +221,12 @@ func (s *Service) run() {
 		case <-s.wake:
 		case <-ticker.C:
 		case msg, ok := <-receiver:
+			if !s.isCurrentMessageReceiver(receiver) {
+				if ok {
+					applog.Debug("spotify connect: ignoring message from stale dealer receiver")
+				}
+				continue
+			}
 			if !ok {
 				s.mu.Lock()
 				if s.receiver == receiver {
@@ -233,6 +239,13 @@ func (s *Service) run() {
 			}
 			s.handleDealerMessage(msg)
 		case req, ok := <-requests:
+			if !s.isCurrentRequestReceiver(requests) {
+				if ok {
+					applog.Debug("spotify connect: rejecting request from stale dealer receiver")
+					req.Reply(false)
+				}
+				continue
+			}
 			if !ok {
 				s.mu.Lock()
 				if s.requests == requests {
@@ -246,6 +259,18 @@ func (s *Service) run() {
 
 		s.reconcile()
 	}
+}
+
+func (s *Service) isCurrentMessageReceiver(receiver <-chan dealer.Message) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.receiver == receiver
+}
+
+func (s *Service) isCurrentRequestReceiver(requests <-chan dealer.Request) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests == requests
 }
 
 func (s *Service) reconcile() {
@@ -483,14 +508,36 @@ func (s *Service) handleDealerMessage(msg dealer.Message) {
 }
 
 func (s *Service) handleDealerRequest(req dealer.Request) {
-	applog.Debug("spotify connect: received dealer request uri=%q message_id=%d endpoint=%q sent_by=%q relative=%q position=%d value_type=%T data_bytes=%d context_uri=%q", req.MessageIdent, req.Payload.MessageId, req.Payload.Command.Endpoint, req.Payload.SentByDeviceId, req.Payload.Command.Relative, req.Payload.Command.Position, req.Payload.Command.Value, len(req.Payload.Command.Data), req.Payload.Command.Context.Uri)
-	if err := s.dispatchCommand(req.Payload); err != nil {
-		s.logError("handle Spotify player command", err)
+	if err := s.handleDealerRequestPayload(req.MessageIdent, req.Payload); err != nil {
+		applog.Warn("spotify connect: rejecting dealer request: %v", err)
 		req.Reply(false)
 		return
 	}
 	applog.Debug("spotify connect: acknowledged dealer request endpoint=%q", req.Payload.Command.Endpoint)
 	req.Reply(true)
+}
+
+// handleDealerRequestPayload validates the decoded dealer payload before it
+// reaches command translation. dealer.RequestPayload is populated from remote
+// JSON, so pointer fields such as Command.Context are always optional.
+func (s *Service) handleDealerRequestPayload(messageIdent string, payload dealer.RequestPayload) error {
+	endpoint := strings.TrimSpace(payload.Command.Endpoint)
+	if messageIdent != playerCommandURI {
+		return fmt.Errorf("unexpected dealer request URI %q", messageIdent)
+	}
+	if endpoint == "" {
+		return fmt.Errorf("dealer request has no command endpoint")
+	}
+
+	contextURI := ""
+	if payload.Command.Context != nil {
+		contextURI = payload.Command.Context.Uri
+	}
+	applog.Debug("spotify connect: received dealer request uri=%q message_id=%d endpoint=%q sent_by=%q relative=%q position=%d value_type=%T data_bytes=%d context_uri=%q", messageIdent, payload.MessageId, endpoint, payload.SentByDeviceId, payload.Command.Relative, payload.Command.Position, payload.Command.Value, len(payload.Command.Data), contextURI)
+	if payload.SentByDeviceId == "" {
+		applog.Debug("spotify connect: dealer request endpoint=%q has no sender device id", endpoint)
+	}
+	return s.dispatchCommand(payload)
 }
 
 func (s *Service) dispatchCommand(req dealer.RequestPayload) error {
