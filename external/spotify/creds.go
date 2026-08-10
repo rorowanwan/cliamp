@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/internal/appdir"
 )
 
@@ -24,18 +25,57 @@ func CredsPath() (string, error) {
 	return filepath.Join(dir, "spotify_credentials.json"), nil
 }
 
-// DeleteCreds removes the stored Spotify credentials file.
-// Returns true if a file was removed, false if it did not exist.
+// PlaybackCredsPath returns the isolated librespot Access Point credential
+// store. These credentials are never used for the Spotify Web API.
+func PlaybackCredsPath() (string, error) {
+	dir, err := appdir.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "spotify_playback_credentials.json"), nil
+}
+
+// WebCredsPath returns the isolated custom-client OAuth refresh-token store.
+// It is intentionally separate from librespot's playback credential.
+func WebCredsPath() (string, error) {
+	dir, err := appdir.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "spotify_web_credentials.json"), nil
+}
+
+// DeleteCreds removes the legacy combined credential file and both isolated
+// credential stores. Returns true if at least one file was removed.
 func DeleteCreds() (bool, error) {
-	path, err := CredsPath()
+	legacy, err := CredsPath()
 	if err != nil {
 		return false, err
 	}
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
+	playback, err := PlaybackCredsPath()
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	web, err := WebCredsPath()
+	if err != nil {
+		return false, err
+	}
+
+	removed := false
+	for _, path := range []string{legacy, playback, web} {
+		if err := os.Remove(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			applog.Warn("spotify auth: failed removing credential file: %v", err)
+			return removed, err
+		}
+		removed = true
+	}
+	if removed {
+		applog.Info("spotify auth: removed persisted playback and Web API credentials")
+	} else {
+		applog.Debug("spotify auth: reset found no persisted credential files")
+	}
+	return removed, nil
 }

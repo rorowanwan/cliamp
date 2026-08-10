@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/bjarneo/cliamp/applog"
 	"github.com/bjarneo/cliamp/internal/browser"
@@ -30,12 +31,29 @@ import (
 	spotifyoauth2 "golang.org/x/oauth2/spotify"
 )
 
-// storedCreds holds persisted Spotify credentials for re-authentication.
+// playbackCreds contains only the reusable Access Point credential used by
+// librespot playback, dealer, and Spotify Connect. It is issued by the
+// matched-client InteractiveCredentials flow.
+type playbackCreds struct {
+	Username string `json:"username"`
+	Data     []byte `json:"data"`
+	DeviceID string `json:"device_id"`
+}
+
+// webCreds contains only the custom Spotify Developer Dashboard OAuth refresh
+// token used for cliamp's Web API calls. It must never replace playbackCreds.
+type webCreds struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// storedCreds is the old combined on-disk format. It is read only for
+// migration; successful authentication writes the two isolated credential
+// files instead.
 type storedCreds struct {
 	Username     string `json:"username"`
 	Data         []byte `json:"data"`
 	DeviceID     string `json:"device_id"`
-	RefreshToken string `json:"refresh_token,omitempty"` // OAuth2 refresh token for silent re-auth
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // CallbackPort is the fixed port for the OAuth2 callback server.
@@ -72,19 +90,27 @@ type Session struct {
 	devID       string
 	clientID    string             // Spotify Developer app client ID
 	tokenSource oauth2.TokenSource // auto-refreshing OAuth2 token source
+	webRefresh  string             // last persisted Web API refresh token
 }
 
-// NewSession creates a go-librespot session, using stored credentials if
-// available, otherwise starting an interactive OAuth2 flow.
-// clientID is the Spotify Developer app client ID for Web API access.
+// NewSession creates a playback session from its isolated stored credential,
+// falling back to librespot's matched-client interactive login only when
+// needed. It then silently refreshes, or interactively obtains, the separate
+// custom-client Web API credential.
 func NewSession(ctx context.Context, clientID string) (*Session, error) {
-	creds, err := loadCreds()
-	if err == nil && creds.Username != "" && len(creds.Data) > 0 {
-		s, err := newSessionFromStored(ctx, clientID, creds, false)
+	playback, err := loadPlaybackCreds()
+	if err == nil && playback.usable() {
+		s, err := newSessionFromPlaybackCreds(ctx, clientID, playback)
 		if err == nil {
+			if err := s.configureWebAPI(ctx, true); err != nil {
+				s.Close()
+				return nil, err
+			}
 			return s, nil
 		}
-		// Stored credentials failed (expired/revoked), fall through to interactive.
+		applog.Warn("spotify auth: persisted playback credential failed; bootstrapping a replacement: %v", err)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		applog.Warn("spotify auth: cannot use persisted playback credential: %v", err)
 	}
 	return newInteractiveSession(ctx, clientID)
 }
@@ -92,24 +118,42 @@ func NewSession(ctx context.Context, clientID string) (*Session, error) {
 // NewSessionSilent is like NewSession but only uses stored credentials.
 // Returns an error if interactive auth is required.
 func NewSessionSilent(ctx context.Context, clientID string) (*Session, error) {
-	creds, err := loadCreds()
-	if err != nil || creds.Username == "" || len(creds.Data) == 0 {
+	playback, err := loadPlaybackCreds()
+	if err != nil || !playback.usable() {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			applog.Warn("spotify auth: silent session cannot read persisted playback credential: %v", err)
+		} else {
+			applog.Debug("spotify auth: silent session has no usable persisted playback credential")
+		}
 		return nil, fmt.Errorf("no stored credentials")
 	}
-	return newSessionFromStored(ctx, clientID, creds, true)
+	s, err := newSessionFromPlaybackCreds(ctx, clientID, playback)
+	if err != nil {
+		return nil, err
+	}
+	// Web API failure must not tear down a healthy private playback session.
+	if err := s.configureWebAPI(ctx, false); err != nil {
+		applog.Warn("spotify auth: silent Web API authorization unavailable; playback remains active: %v", err)
+	}
+	return s, nil
 }
 
-// newSessionFromStored creates a session from stored credentials.
-// When silentOnly is true, it will not fall back to browser-based auth
-// if the silent token refresh fails.
-func newSessionFromStored(ctx context.Context, clientID string, creds *storedCreds, silentOnly bool) (*Session, error) {
+func (c *playbackCreds) usable() bool {
+	return c != nil && c.Username != "" && len(c.Data) > 0
+}
+
+// newSessionFromPlaybackCreds authenticates AP and login5 exclusively with the
+// persisted matched-client credential. It does not read or write Web API OAuth
+// state.
+func newSessionFromPlaybackCreds(ctx context.Context, clientID string, creds *playbackCreds) (*Session, error) {
 	devID := creds.DeviceID
 	if devID == "" {
 		devID = generateDeviceID()
 	}
 
+	applog.Debug("spotify auth: authenticating AP and login5 from persisted playback credential")
 	sess, err := session.NewSessionFromOptions(ctx, &session.Options{
-		Log:        &librespot.NullLogger{},
+		Log:        newCredentialLifecycleLogger(),
 		DeviceType: devicespb.DeviceType_COMPUTER,
 		DeviceId:   devID,
 		Credentials: session.StoredCredentials{
@@ -118,74 +162,12 @@ func newSessionFromStored(ctx context.Context, clientID string, creds *storedCre
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("spotify: stored auth: %w", err)
+		return nil, fmt.Errorf("spotify: stored playback auth: %w", err)
 	}
-
-	// For stored credentials, we need a fresh Web API token via OAuth2.
-	// The spclient's login5 token is NOT suitable for Web API calls.
-	// Try silent refresh first (no browser), fall back to interactive.
-	var oauthToken *oauth2.Token
-	var refreshErr error
-	if creds.RefreshToken != "" {
-		token, err := silentTokenRefresh(clientID, creds.RefreshToken)
-		if err == nil {
-			oauthToken = token
-		} else {
-			refreshErr = err
-		}
-	}
-	// Dead refresh tokens (invalid_grant) never recover — clear so we don't
-	// repeat the same failure on every launch.
-	if isInvalidGrant(refreshErr) {
-		applog.UserError("spotify: stored refresh token is invalid; clearing credentials, please sign in again")
-		if _, err := DeleteCreds(); err != nil {
-			applog.Warn("spotify: failed to clear stored credentials: %v", err)
-		}
-		sess.Close()
-		return nil, fmt.Errorf("spotify: %w", playlist.ErrNeedsAuth)
-	}
-	if oauthToken == nil {
-		if silentOnly {
-			// Continue without a token source — already-loaded tracks still stream
-			// via spclient; new Web API calls will return ErrNeedsAuth.
-			applog.UserError("spotify: stored auth no longer valid; run 'cliamp spotify reset' or sign in again to fix")
-			s := &Session{sess: sess, devID: devID, clientID: clientID}
-			if err := saveCreds(&storedCreds{
-				Username:     sess.Username(),
-				Data:         sess.StoredCredentials(),
-				DeviceID:     devID,
-				RefreshToken: creds.RefreshToken, // preserve for next attempt
-			}); err != nil {
-				applog.UserError("spotify: failed to save credentials: %v", err)
-			}
-			if err := s.initPlayer(); err != nil {
-				sess.Close()
-				return nil, err
-			}
-			return s, nil
-		}
-		token, err := doWebAPIAuth(ctx, clientID)
-		if err != nil {
-			sess.Close()
-			return nil, fmt.Errorf("stored session needs fresh Web API token: %w", err)
-		}
-		oauthToken = token
-	}
-
-	// Create an auto-refreshing token source — handles expiry transparently.
-	conf := spotifyOAuthConfig(clientID)
-	ts := conf.TokenSource(context.Background(), oauthToken)
-
-	s := &Session{sess: sess, devID: devID, clientID: clientID, tokenSource: ts}
-
-	// Re-save credentials (including refresh token for next launch).
-	if err := saveCreds(&storedCreds{
-		Username:     sess.Username(),
-		Data:         sess.StoredCredentials(),
-		DeviceID:     devID,
-		RefreshToken: oauthToken.RefreshToken,
-	}); err != nil {
-		applog.UserError("spotify: failed to save credentials: %v", err)
+	applog.Debug("spotify auth: persisted AP/login5 authentication succeeded")
+	s := &Session{sess: sess, devID: devID, clientID: clientID}
+	if err := savePlaybackCreds(&playbackCreds{Username: sess.Username(), Data: sess.StoredCredentials(), DeviceID: devID}); err != nil {
+		applog.Warn("spotify auth: failed migrating persisted playback credential: %v", err)
 	}
 
 	if err := s.initPlayer(); err != nil {
@@ -204,7 +186,10 @@ var oauthScopes = []string{
 	// Playlist modification (save queue, create playlists)
 	"playlist-modify-public",
 	"playlist-modify-private",
-	// Streaming audio
+	// Playback and remote control. app-remote-control matches go-librespot's
+	// InteractiveCredentials flow and is needed for the Spotify app's remote
+	// playback authorization.
+	"app-remote-control",
 	"streaming",
 	// Library (liked songs, saved albums)
 	"user-library-read",
@@ -277,6 +262,7 @@ func performOAuth2PKCE(ctx context.Context, clientID string) (*oauth2.Token, err
 	authURL := oauthConf.AuthCodeURL("", oauth2.S256ChallengeOption(verifier))
 
 	notifyAuthURL(authURL)
+	applog.Debug("spotify auth: PKCE authorization started; awaiting loopback callback")
 
 	codeCh := make(chan string, 1)
 	go func() {
@@ -301,10 +287,12 @@ func performOAuth2PKCE(ctx context.Context, clientID string) (*oauth2.Token, err
 		return nil, fmt.Errorf("authentication cancelled: %w", ctx.Err())
 	}
 
-	token, err := oauthConf.Exchange(ctx, code, oauth2.VerifierOption(verifier))
+	token, httpStatus, err := exchangeOAuthCode(ctx, oauthConf, code, verifier)
 	if err != nil {
+		applog.Warn("spotify auth: PKCE code exchange failed (http_status=%d): %v", httpStatus, err)
 		return nil, fmt.Errorf("token exchange: %w", err)
 	}
+	logOAuthToken("PKCE code exchange", token, httpStatus)
 
 	return token, nil
 }
@@ -320,51 +308,168 @@ func doWebAPIAuth(ctx context.Context, clientID string) (*oauth2.Token, error) {
 	return token, nil
 }
 
+// newInteractiveSession performs the two one-time authorizations required on
+// a clean install. The matched-client playback bootstrap runs first; after it
+// succeeds its reusable AP credential is saved independently before the custom
+// Developer Dashboard Web API PKCE flow begins.
 func newInteractiveSession(ctx context.Context, clientID string) (*Session, error) {
-	devID := generateDeviceID()
-
-	token, err := performOAuth2PKCE(ctx, clientID)
+	s, err := newInteractivePlaybackSession(ctx, clientID)
 	if err != nil {
-		return nil, fmt.Errorf("spotify: %w", err)
+		return nil, err
 	}
+	if err := s.configureWebAPI(ctx, true); err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
 
-	username, _ := token.Extra("username").(string)
-	accessToken := token.AccessToken
-
-	// Create go-librespot session using the OAuth2 token.
+// newInteractivePlaybackSession uses go-librespot's own InteractiveCredentials
+// flow. Its OAuth client identity therefore matches the identity presented to
+// login5, unlike cliamp's custom Web API client ID.
+func newInteractivePlaybackSession(ctx context.Context, clientID string) (*Session, error) {
+	devID := generateDeviceID()
+	applog.Info("spotify auth: playback bootstrap requires librespot authorization")
 	sess, err := session.NewSessionFromOptions(ctx, &session.Options{
-		Log:        &librespot.NullLogger{},
+		Log:        newCredentialLifecycleLogger(),
 		DeviceType: devicespb.DeviceType_COMPUTER,
 		DeviceId:   devID,
-		Credentials: session.SpotifyTokenCredentials{
-			Username: username,
-			Token:    accessToken,
+		Credentials: session.InteractiveCredentials{
+			CallbackPort: CallbackPort,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("spotify: session from token: %w", err)
+		applog.Warn("spotify auth: matched-client playback bootstrap failed: %v", err)
+		return nil, fmt.Errorf("spotify: interactive playback session: %w", err)
 	}
 
-	// Persist stored credentials + refresh token for future sessions.
-	if err := saveCreds(&storedCreds{
-		Username:     sess.Username(),
-		Data:         sess.StoredCredentials(),
-		DeviceID:     devID,
-		RefreshToken: token.RefreshToken,
+	if err := savePlaybackCreds(&playbackCreds{
+		Username: sess.Username(),
+		Data:     sess.StoredCredentials(),
+		DeviceID: devID,
 	}); err != nil {
-		applog.UserError("spotify: failed to save credentials: %v", err)
+		sess.Close()
+		return nil, fmt.Errorf("spotify: persist playback credential: %w", err)
 	}
 
-	// Create an auto-refreshing token source for Web API calls.
-	conf := spotifyOAuthConfig(clientID)
-	ts := conf.TokenSource(context.Background(), token)
-
-	s := &Session{sess: sess, devID: devID, clientID: clientID, tokenSource: ts}
+	s := &Session{sess: sess, devID: devID, clientID: clientID}
 	if err := s.initPlayer(); err != nil {
 		sess.Close()
 		return nil, err
 	}
+	applog.Info("spotify auth: matched-client playback bootstrap succeeded")
 	return s, nil
+}
+
+// configureWebAPI restores custom-client Web API access without changing the
+// already established playback session. When interactive is false, missing or
+// invalid Web API credentials leave playback usable and tokenSource nil.
+func (s *Session) configureWebAPI(ctx context.Context, interactive bool) error {
+	web, err := loadWebCreds()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if !interactive {
+			return fmt.Errorf("load Web API credential: %w", err)
+		}
+		// A damaged Web API store must not invalidate a separately healthy
+		// playback session. Interactive startup can replace only this lane.
+		applog.Warn("spotify auth: cannot read custom Web API credential; authorization required: %v", err)
+		web = nil
+	}
+	if web != nil && web.RefreshToken != "" {
+		applog.Debug("spotify auth: custom Web API refresh-token renewal started")
+		token, err := silentTokenRefresh(s.clientID, web.RefreshToken)
+		if err == nil {
+			if token.RefreshToken == "" {
+				token.RefreshToken = web.RefreshToken
+			}
+			if err := s.setWebToken(token); err != nil {
+				return err
+			}
+			applog.Debug("spotify auth: custom Web API refresh-token renewal succeeded")
+			return nil
+		}
+		if !interactive {
+			return fmt.Errorf("refresh custom Web API token: %w", err)
+		}
+		applog.Warn("spotify auth: custom Web API refresh-token renewal failed; authorization required: %v", err)
+	}
+	if !interactive {
+		return fmt.Errorf("no custom Web API credential: %w", playlist.ErrNeedsAuth)
+	}
+
+	applog.Info("spotify auth: Web API authorization requires your configured Spotify client")
+	token, err := doWebAPIAuth(ctx, s.clientID)
+	if err != nil {
+		return fmt.Errorf("spotify: Web API authorization: %w", err)
+	}
+	return s.setWebToken(token)
+}
+
+func (s *Session) setWebToken(token *oauth2.Token) error {
+	if token == nil || token.AccessToken == "" || token.RefreshToken == "" {
+		return fmt.Errorf("spotify: Web API authorization returned an incomplete token")
+	}
+	if err := saveWebCreds(&webCreds{RefreshToken: token.RefreshToken}); err != nil {
+		return fmt.Errorf("persist Web API credential: %w", err)
+	}
+	conf := spotifyOAuthConfig(s.clientID)
+	s.mu.Lock()
+	s.tokenSource = conf.TokenSource(context.Background(), token)
+	s.webRefresh = token.RefreshToken
+	s.mu.Unlock()
+	return nil
+}
+
+// exchangeStatusTransport records only the HTTP status code. It deliberately
+// does not retain request URLs, headers, or bodies, all of which can contain
+// OAuth secrets during a token exchange.
+type exchangeStatusTransport struct {
+	base   http.RoundTripper
+	status atomic.Int32
+}
+
+func (t *exchangeStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if resp != nil {
+		t.status.Store(int32(resp.StatusCode))
+	}
+	return resp, err
+}
+
+// exchangeOAuthCode performs a PKCE code exchange while observing its HTTP
+// status for diagnostics. oauth2.Config.Exchange otherwise intentionally only
+// exposes the decoded token or an error.
+func exchangeOAuthCode(ctx context.Context, conf *oauth2.Config, code, verifier string) (*oauth2.Token, int, error) {
+	baseClient := http.DefaultClient
+	if client, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && client != nil {
+		baseClient = client
+	}
+	client := *baseClient
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport := &exchangeStatusTransport{base: base}
+	client.Transport = transport
+	exchangeCtx := context.WithValue(ctx, oauth2.HTTPClient, &client)
+	token, err := conf.Exchange(exchangeCtx, code, oauth2.VerifierOption(verifier))
+	return token, int(transport.status.Load()), err
+}
+
+// logOAuthToken records authentication-relevant metadata without exposing any
+// credential material. OAuth2 treats a non-nil token returned without error as
+// a successful token-endpoint response.
+func logOAuthToken(stage string, token *oauth2.Token, httpStatus int) {
+	if token == nil {
+		applog.Warn("spotify auth: %s returned no token (http_status=%d)", stage, httpStatus)
+		return
+	}
+	expiresIn := int64(-1)
+	if !token.Expiry.IsZero() {
+		expiresIn = int64(time.Until(token.Expiry).Round(time.Second).Seconds())
+	}
+	scopes, _ := token.Extra("scope").(string)
+	applog.Debug("spotify auth: %s succeeded (http_status=%d token_type=%q access_token_present=%t refresh_token_present=%t expires_in_seconds=%d valid=%t scopes=%q)", stage, httpStatus, token.TokenType, token.AccessToken != "", token.RefreshToken != "", expiresIn, token.Valid(), scopes)
 }
 
 // initPlayer creates the go-librespot player. We only use NewStream() for
@@ -437,6 +542,7 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 	if err != nil {
 		return nil, fmt.Errorf("refresh access token: %w", err)
 	}
+	s.persistWebRefreshToken(tok)
 	token := tok.AccessToken
 
 	u, _ := url.Parse("https://api.spotify.com")
@@ -458,6 +564,24 @@ func (s *Session) webApiWithBody(ctx context.Context, method, path string, query
 	return http.DefaultClient.Do(req)
 }
 
+// persistWebRefreshToken records a rotated custom OAuth refresh token without
+// touching the independent playback credential store.
+func (s *Session) persistWebRefreshToken(token *oauth2.Token) {
+	if token == nil || token.RefreshToken == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.webRefresh == token.RefreshToken {
+		s.mu.Unlock()
+		return
+	}
+	s.webRefresh = token.RefreshToken
+	s.mu.Unlock()
+	if err := saveWebCreds(&webCreds{RefreshToken: token.RefreshToken}); err != nil {
+		applog.Warn("spotify auth: failed persisting rotated Web API refresh token: %v", err)
+	}
+}
+
 // Close releases all session and player resources.
 func (s *Session) Close() {
 	s.mu.Lock()
@@ -470,16 +594,19 @@ func (s *Session) Close() {
 	}
 }
 
-// Reconnect rebuilds the session from stored credentials (no browser).
-// Returns an error if stored credentials are missing or the refresh fails.
+// Reconnect rebuilds the private playback session from its stored AP
+// credential (no browser). A missing or expired Web API credential is logged
+// but does not interrupt playback.
 func (s *Session) Reconnect(ctx context.Context) error {
+	applog.Debug("spotify auth: starting silent session reconnect")
 	return s.reconnect(ctx, NewSessionSilent)
 }
 
-// ReconnectInteractive forces a fresh browser-based OAuth2 flow.
-// Stored credentials are preserved until the new session succeeds —
-// newInteractiveSession overwrites them via saveCreds on success.
+// ReconnectInteractive starts the browser authorization required by whichever
+// credential lane needs replacement. Existing credential files are retained
+// until their individual replacement succeeds.
 func (s *Session) ReconnectInteractive(ctx context.Context) error {
+	applog.Debug("spotify auth: starting interactive session reconnect")
 	return s.reconnect(ctx, newInteractiveSession)
 }
 
@@ -498,6 +625,7 @@ func (s *Session) reconnect(ctx context.Context, build func(context.Context, str
 
 	newSess, err := build(ctx, clientID)
 	if err != nil {
+		applog.Warn("spotify auth: session reconnect build failed: %v", err)
 		return fmt.Errorf("spotify: reconnect: %w", err)
 	}
 
@@ -511,6 +639,7 @@ func (s *Session) reconnect(ctx context.Context, build func(context.Context, str
 	s.player = newSess.player
 	s.devID = newSess.devID
 	s.tokenSource = newSess.tokenSource
+	s.webRefresh = newSess.webRefresh
 	if oldPlayer != nil {
 		oldPlayer.Close()
 	}
@@ -527,6 +656,7 @@ func (s *Session) reconnect(ctx context.Context, build func(context.Context, str
 
 	const reauthMsg = "spotify: re-authenticated successfully"
 	applog.Info(reauthMsg)
+	applog.Debug("spotify auth: session reconnect completed and replaced the previous session")
 	applog.Status(reauthMsg)
 	return nil
 }
@@ -537,33 +667,133 @@ func generateDeviceID() string {
 	return hex.EncodeToString(b)
 }
 
-func loadCreds() (*storedCreds, error) {
+func loadLegacyCreds() (*storedCreds, error) {
 	path, err := CredsPath()
 	if err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			applog.Debug("spotify auth: persisted credential file not found")
+		} else {
+			applog.Warn("spotify auth: failed reading persisted credential file: %v", err)
+		}
 		return nil, err
 	}
 	var creds storedCreds
 	if err := json.Unmarshal(data, &creds); err != nil {
+		applog.Warn("spotify auth: persisted credential file is malformed: %v", err)
 		return nil, err
 	}
+	applog.Debug("spotify auth: loaded legacy combined credential file (playback_present=%t web_refresh_present=%t)", creds.Username != "" && len(creds.Data) > 0, creds.RefreshToken != "")
 	return &creds, nil
 }
 
-func saveCreds(creds *storedCreds) error {
-	path, err := CredsPath()
+func loadPlaybackCreds() (*playbackCreds, error) {
+	path, err := PlaybackCredsPath()
+	if err != nil {
+		return nil, err
+	}
+	var creds playbackCreds
+	if err := readCredentialFile(path, &creds); err == nil {
+		applog.Debug("spotify auth: loaded isolated playback credential (username_present=%t stored_blob_present=%t device_id_present=%t)", creds.Username != "", len(creds.Data) > 0, creds.DeviceID != "")
+		return &creds, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	legacy, err := loadLegacyCreds()
+	if err != nil {
+		return nil, err
+	}
+	if legacy.Username == "" || len(legacy.Data) == 0 {
+		return nil, os.ErrNotExist
+	}
+	applog.Info("spotify auth: using legacy playback credential; it will migrate after a successful login")
+	return &playbackCreds{Username: legacy.Username, Data: legacy.Data, DeviceID: legacy.DeviceID}, nil
+}
+
+func loadWebCreds() (*webCreds, error) {
+	path, err := WebCredsPath()
+	if err != nil {
+		return nil, err
+	}
+	var creds webCreds
+	if err := readCredentialFile(path, &creds); err == nil {
+		applog.Debug("spotify auth: loaded isolated Web API credential (refresh_token_present=%t)", creds.RefreshToken != "")
+		return &creds, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	legacy, err := loadLegacyCreds()
+	if err != nil {
+		return nil, err
+	}
+	if legacy.RefreshToken == "" {
+		return nil, os.ErrNotExist
+	}
+	applog.Info("spotify auth: using legacy Web API refresh token; it will migrate after a successful refresh")
+	return &webCreds{RefreshToken: legacy.RefreshToken}, nil
+}
+
+func savePlaybackCreds(creds *playbackCreds) error {
+	if creds == nil || !creds.usable() {
+		return errors.New("incomplete playback credentials")
+	}
+	path, err := PlaybackCredsPath()
 	if err != nil {
 		return err
 	}
+	if err := writeCredentialFile(path, creds); err != nil {
+		return err
+	}
+	applog.Info("spotify auth: persisted isolated playback credential (device_id_present=%t)", creds.DeviceID != "")
+	return nil
+}
+
+func saveWebCreds(creds *webCreds) error {
+	if creds == nil || creds.RefreshToken == "" {
+		return errors.New("incomplete Web API credentials")
+	}
+	path, err := WebCredsPath()
+	if err != nil {
+		return err
+	}
+	if err := writeCredentialFile(path, creds); err != nil {
+		return err
+	}
+	applog.Info("spotify auth: persisted isolated Web API refresh credential")
+	return nil
+}
+
+func readCredentialFile(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			applog.Warn("spotify auth: failed reading credential file: %v", err)
+		}
+		return err
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		applog.Warn("spotify auth: credential file is malformed: %v", err)
+		return err
+	}
+	return nil
+}
+
+func writeCredentialFile(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(creds)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		applog.Warn("spotify auth: failed persisting credential file: %v", err)
+		return err
+	}
+	return nil
 }

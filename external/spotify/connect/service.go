@@ -133,6 +133,7 @@ func (s *Service) bind(next endpoint) {
 	s.receiver = nil
 	s.requests = nil
 	s.mu.Unlock()
+	applog.Debug("spotify connect: bound to replacement Spotify session; dealer and state publisher will re-register")
 	s.signal()
 }
 
